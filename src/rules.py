@@ -51,6 +51,94 @@ def is_cluster(observations, max_days=14, radius_km=10):
     return same_window and close
 
 
+CLUSTER_MAX_DAYS = 14
+CLUSTER_RADIUS_KM = 10
+
+# 终端权威字段：野外现场采集的物种与位置，冲突时以终端最后一次提交为准。
+TERMINAL_AUTHORITATIVE_FIELDS = ("event_id", "species", "location", "observed_at", "lat", "lon")
+# 站内权威字段：鉴定结果与样本状态，冲突时以站内为准，终端不得整条覆盖。
+STATION_AUTHORITATIVE_FIELDS = ("lab_result", "sample_status")
+
+
+def merge_observation(terminal_data, station_data):
+    """终端与站内都修改过同一观察时的字段级合并。
+
+    物种、位置、观察时间等野外字段以终端最后一次提交为准；
+    鉴定结果、样本状态等站内字段以站内为准。不允许整条互相覆盖。
+
+    返回 (merged, terminal_applied, station_preserved, rejected)：
+    - merged：合并后的完整数据
+    - terminal_applied：本次采纳的终端字段
+    - station_preserved：保留的站内字段
+    - rejected：终端试图写入但被拒绝的站内字段
+    """
+    merged = dict(station_data)
+    terminal_applied = []
+    station_preserved = []
+    rejected = []
+    for field in TERMINAL_AUTHORITATIVE_FIELDS:
+        if field in terminal_data:
+            if terminal_data[field] != station_data.get(field):
+                terminal_applied.append(field)
+            merged[field] = terminal_data[field]
+    for field in STATION_AUTHORITATIVE_FIELDS:
+        if field in terminal_data and terminal_data[field] != station_data.get(field):
+            rejected.append(field)
+        if field in station_data:
+            merged[field] = station_data[field]
+            station_preserved.append(field)
+    return merged, terminal_applied, station_preserved, rejected
+
+
+def recompute_cluster(cluster, observations, max_days=CLUSTER_MAX_DAYS, radius_km=CLUSTER_RADIUS_KM):
+    """根据全部观察重算聚集事件成员。
+
+    以事件已有成员的最早观察时间为窗口基准，拉入半径内且未超时的观察。
+    超时（超出窗口）的观察不能被拉入；有效成员不足三点时事件不可恢复确认。
+
+    返回 (member_ids, centroid, viable)。
+    """
+    cdata = cluster.get("data", {})
+    centroid = cdata.get("centroid")
+    if not centroid or len(centroid) < 2:
+        return [], None, False
+    existing_ids = set(cdata.get("observation_ids", []))
+    existing_dates = [
+        item["data"].get("observed_at")
+        for item in observations
+        if item.get("id") in existing_ids and item.get("data", {}).get("observed_at")
+    ]
+    if existing_dates:
+        ref_ord = _date_ordinal(min(existing_dates))
+    else:
+        nearby = [
+            item for item in observations
+            if item.get("kind") == "observation"
+            and "lat" in item.get("data", {})
+            and _haversine_km(centroid[0], centroid[1], item["data"]["lat"], item["data"]["lon"]) <= radius_km
+        ]
+        if not nearby:
+            return [], centroid, False
+        ref_ord = _date_ordinal(min(item["data"]["observed_at"] for item in nearby))
+    valid = []
+    for item in observations:
+        if item.get("kind") != "observation":
+            continue
+        data = item.get("data", {})
+        if "lat" not in data or "lon" not in data or "observed_at" not in data:
+            continue
+        if _haversine_km(centroid[0], centroid[1], data["lat"], data["lon"]) > radius_km:
+            continue
+        if abs(_date_ordinal(data["observed_at"]) - ref_ord) > max_days:
+            continue  # 超时观察不能被拉入
+        valid.append(item)
+    if len(valid) < 3:
+        return [item["id"] for item in valid], centroid, False
+    clat = round(sum(item["data"]["lat"] for item in valid) / len(valid), 6)
+    clon = round(sum(item["data"]["lon"] for item in valid) / len(valid), 6)
+    return [item["id"] for item in valid], [clat, clon], True
+
+
 CUSTOM_CREATE = {'observation': _validate_observation, 'sample': _validate_sample}
 CUSTOM_TRANSITIONS = {('sample', 'lab_result'): _validate_lab_result}
 

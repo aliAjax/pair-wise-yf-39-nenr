@@ -138,6 +138,13 @@ def create_handler(service, rules, static_dir):
                         200,
                         service.transition(actor, parts[2], parts[3], self._body(), None),
                     )
+                if len(parts) == 2 and parts[0] == "api" and parts[1] == "sync":
+                    body = self._body()
+                    batch_id = body.pop("batch_id", None) or self.headers.get("Idempotency-Key")
+                    items = body.get("items", [])
+                    if not isinstance(items, list):
+                        raise ValidationError("items must be a list")
+                    return self._send(200, service.sync_batch(actor, items, batch_id))
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()
                     idem = self.headers.get("Idempotency-Key")
