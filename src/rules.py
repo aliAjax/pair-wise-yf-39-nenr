@@ -54,6 +54,87 @@ def is_cluster(observations, max_days=14, radius_km=10):
 CUSTOM_CREATE = {'observation': _validate_observation, 'sample': _validate_sample}
 CUSTOM_TRANSITIONS = {('sample', 'lab_result'): _validate_lab_result}
 
+# 站内权威字段：鉴定结果与样本状态以站内为准，终端提交的这些字段一律丢弃。
+# 其余字段（物种、位置、时间等）以终端最后一次提交为准。
+OBSERVATION_STATION_FIELDS = frozenset({
+    "identification",
+    "identified_by",
+    "identified_at",
+    "sample_id",
+    "sample_status",
+    "reason",
+    "reviewed_by",
+    "review_note",
+})
+
+# 聚集事件成员资格：时间窗（天）、空间半径（公里）、最少点数。
+CLUSTER_MAX_DAYS = 14
+CLUSTER_RADIUS_KM = 10
+CLUSTER_MIN_POINTS = 3
+
+
+def merge_observation_data(current, incoming):
+    """字段级合并终端与站内都改过的观察，不整条互相覆盖。
+
+    站内权威字段（鉴定结果、样本状态）保留站内现值；其余字段以终端
+    最后一次提交为准。返回 (合并后数据, 采用终端值的字段, 保留站内值的字段)。
+    """
+    merged = dict(current)
+    applied = []
+    station_kept = []
+    for field, value in incoming.items():
+        if field in OBSERVATION_STATION_FIELDS:
+            station_kept.append(field)
+            continue
+        if merged.get(field) != value:
+            merged[field] = value
+            applied.append(field)
+    return merged, applied, station_kept
+
+
+def recalculate_members(observations, max_days=CLUSTER_MAX_DAYS,
+                        radius_km=CLUSTER_RADIUS_KM, min_points=CLUSTER_MIN_POINTS):
+    """重算聚集事件成员。
+
+    候选观察按观测日期滑动时间窗、以锚点限制空间半径，取规模最大的
+    一组；规模相同取结束日期更新的一组。超窗（超时）的观察不会被拉入，
+    不足 min_points 个点时返回空成员，事件不得维持确认状态。
+    返回 (成员 id 列表, 质心 [lat, lon] 或 None)。
+    """
+    points = []
+    for entity in observations:
+        data = entity["data"]
+        observed_at = data.get("observed_at")
+        lat, lon = data.get("lat"), data.get("lon")
+        if observed_at and lat is not None and lon is not None:
+            points.append({
+                "id": entity["id"],
+                "observed_at": observed_at,
+                "lat": float(lat),
+                "lon": float(lon),
+            })
+    points.sort(key=lambda p: (_date_ordinal(p["observed_at"]), p["id"]))
+    best = []
+    for index, anchor in enumerate(points):
+        start = _date_ordinal(anchor["observed_at"])
+        group = [
+            point for point in points[index:]
+            if _date_ordinal(point["observed_at"]) - start <= max_days
+            and _haversine_km(anchor["lat"], anchor["lon"], point["lat"], point["lon"]) <= radius_km
+        ]
+        if len(group) > len(best) or (
+            len(group) == len(best) and group and best
+            and _date_ordinal(group[-1]["observed_at"]) > _date_ordinal(best[-1]["observed_at"])
+        ):
+            best = group
+    if len(best) < min_points:
+        return [], None
+    centroid = [
+        round(sum(p["lat"] for p in best) / len(best), 6),
+        round(sum(p["lon"] for p in best) / len(best), 6),
+    ]
+    return [p["id"] for p in best], centroid
+
 
 class RuleEngine:
     ALIASES = {'observations': 'observation', 'samples': 'sample', 'clusters': 'cluster'}

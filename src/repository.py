@@ -54,6 +54,14 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS sync_items (
+                    actor_id TEXT NOT NULL,
+                    batch_id TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(actor_id, batch_id, item_key)
+                );
             """)
 
     @staticmethod
@@ -195,6 +203,36 @@ class SQLiteRepository:
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
             )
+
+    def get_sync_item(self, actor_id, batch_id, item_key):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result FROM sync_items WHERE actor_id = ? AND batch_id = ? AND item_key = ?",
+                (actor_id, batch_id, item_key),
+            ).fetchone()
+        return json.loads(row["result"]) if row else None
+
+    def save_sync_item(self, actor_id, batch_id, item_key, result):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO sync_items(actor_id, batch_id, item_key, result, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    actor_id,
+                    batch_id,
+                    item_key,
+                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    utcnow(),
+                ),
+            )
+
+    def list_sync_items(self, actor_id, batch_id):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT result FROM sync_items WHERE actor_id = ? AND batch_id = ? ORDER BY rowid",
+                (actor_id, batch_id),
+            ).fetchall()
+        return [json.loads(row["result"]) for row in rows]
 
     def ping(self):
         with self._connect() as connection:

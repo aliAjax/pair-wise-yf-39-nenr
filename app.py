@@ -7,6 +7,7 @@ from src.http_api import create_server
 from src.repository import SQLiteRepository
 from src.rules import RuleEngine
 from src.service import DomainService
+from src.sync import SyncService
 
 
 def main(argv=None):
@@ -19,8 +20,9 @@ def main(argv=None):
     repository = SQLiteRepository(args.db)
     rules = RuleEngine()
     service = DomainService(repository, rules)
+    sync = SyncService(service)
     static_dir = Path(__file__).resolve().parent / "static"
-    server = create_server(args.host, args.port, service, rules, str(static_dir))
+    server = create_server(args.host, args.port, service, rules, str(static_dir), sync)
 
     def stop(signum, frame):
         raise KeyboardInterrupt
